@@ -1,0 +1,103 @@
+name: Update Hugo Version Pin in Netlify Config
+branding:
+  icon: arrow-up-circle
+  color: purple
+description: |
+  Update the version pin for Hugo in a netlify.toml file if needed.
+inputs:
+  no-install:
+    description: Specify to skip the hugo install step
+    required: false
+    default: 'false'
+  no-write:
+    description: Specify to prevent updating the netlify.toml
+    required: false
+    default: 'false'
+  line-endings:
+    description: Whether to write LF or CRLF line endings in netlify.toml.
+    required: false
+    default: 'LF'
+  netlify-toml-path:
+    description: Path to the netlify.toml config file from project root
+    required: false
+    default: './netlify.toml'
+outputs:
+  updatedConfig:
+    description: |
+      Whether or not this action updated the netlify.toml config file
+    value: "${{ steps.update-netlify-toml.outputs.updated }}"
+  latestVersion:
+    description: |
+      The latest version of hugo available if installed via this action
+    value: "${{ steps.get-hugo.outputs.version }}"
+runs:
+  using: composite
+  steps:
+    - name: Setup Hugo
+      if: ${{ inputs.no-install != 'true' }}
+      uses: peaceiris/actions-hugo@v2
+      with:
+        hugo-version: 'latest'
+        extended: true
+    - name: Get Hugo Version
+      shell: pwsh
+      id: get-hugo
+      run: |
+        (hugo version) -match 'hugo v(\d+\.\d+\.\d+)-'
+        if ([string]::IsNullOrEmpty($Matches[1])) {
+          Throw "Could not find hugo version! Is it installed and available?"
+        }
+        echo "::set-output name=version::$($Matches[1])"
+    - name: Check Update Outputs
+      shell: pwsh
+      run: |
+        "${{ steps.get-hugo.outputs.version }}"
+    - name: Update Netlify TOML
+      id: update-netlify-toml
+      shell: pwsh
+      run: |
+        # Initialize output for updated status
+        echo "::set-output name=updated::$false"
+        # Save input as variables for easier use
+        $LineEndingInput = '${{ inputs.line-endings }}'
+        $NetlifyTomlFilePath = '${{ inputs.netlify-toml-path }}'
+        # Process LineEnding input into PowerShell line endings
+        $LineEnding = Switch ($LineEndingInput) {
+          'LF' { "`n" }
+          'CRLF' { "`r`n" }
+          Default {
+            Write-Warning "Invalid line ending specified ('$LineEndingInput'): Must be LF or CRLF; defaulting to LF"
+            "`n"
+          }
+        }
+        # Convert the string output of current version for easier comparison
+        $LatestVersion = [version]::new('${{ steps.get-hugo.outputs.version }}')
+        $CurrentNetlifyToml = Get-Content -Path $NetlifyTomlFilePath
+        # Process the config to see if any updates are needed
+        "Current NetlifyConfig:${LineEnding}`t$($CurrentNetlifyToml -join "${LineEnding}`t")"
+        $NetlifyTomlToWrite = $CurrentNetlifyToml |
+          ForEach-Object -Process {
+            if ($_ -match '^HUGO_VERSION = "(.+)"') {
+              $CurrentVersion = [version]::new($Matches[1])
+              If ($LatestVersion -gt $CurrentVersion) {
+                return $_ -replace $CurrentVersion.ToString(), $LatestVersion.ToString()
+              }
+            }
+            # Latest version not newer than current version or line is not a hugo version
+            $_
+          }
+        "Updated NetlifyConfig:${LineEnding}`t$($NetlifyTomlToWrite -join "${LineEnding}`t")"
+        If (($CurrentNetlifyToml -join $LineEnding) -ne ($NetlifyTomlToWrite -join $LineEnding)) {
+          If ('${{ inputs.no-write }}' -ne 'true') {
+            # Append a final newline and join on line endings
+            # This is necessary to prevent accidentally appending the wrong final newline
+            $NetlifyTomlToWrite = ($NetlifyTomlToWrite + "") -join $LineEnding
+            $NetlifyTomlToWrite | Out-File -FilePath $NetlifyTomlFilePath -Encoding utf8NoBOM -Force -NoNewline
+            echo "::set-output name=updated::$true"
+          } Else {
+            Write-Warning "Parameter no-write specified; not updating netlify.toml despite a newer version being available"
+          }
+        } Else {
+          # No changes to be made
+          echo "::set-output name=updated::$false"
+        }
